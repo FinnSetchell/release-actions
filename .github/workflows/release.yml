@@ -7,8 +7,8 @@ on:
         description: 'Run moogs-structure-validator before building'
         type: boolean
         default: false
-      configPackTasks:
-        description: 'Gradle tasks to publish config pack, space-separated (e.g. "publishCurseforgeDatapack"). Empty = no config pack.'
+      configPack:
+        description: 'Config pack publish targets: "curseforge", "modrinth", or "curseforge modrinth". Empty = no config pack.'
         type: string
         default: ''
       bumpVersion:
@@ -62,8 +62,9 @@ jobs:
     needs: [validate]
     if: always() && (needs.validate.result == 'success' || needs.validate.result == 'skipped')
     outputs:
-      is_alpha:  ${{ steps.releaseType.outputs.is_alpha }}
-      changelog: ${{ steps.changelog.outputs.body }}
+      is_alpha:   ${{ steps.releaseType.outputs.is_alpha }}
+      changelog:  ${{ steps.changelog.outputs.body }}
+      pack_tasks: ${{ steps.packTasks.outputs.tasks }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -79,12 +80,27 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Resolve config-pack tasks
+        id: packTasks
+        shell: bash
+        run: |
+          TASKS=""
+          for p in ${{ inputs.configPack }}; do
+            case "$p" in
+              curseforge) TASKS="$TASKS publishCurseforgeDatapack" ;;
+              modrinth)   TASKS="$TASKS publishModrinthDatapack" ;;
+            esac
+          done
+          echo "tasks=${TASKS# }" >> "$GITHUB_OUTPUT"
+
       - name: Build
         shell: bash
         run: |
           set -eo pipefail
           chmod +x gradlew
-          ./gradlew build ${{ inputs.configPackTasks != '' && 'buildDatapack' || '' }}
+          BUILD_EXTRA=""
+          [ -n "${{ steps.packTasks.outputs.tasks }}" ] && BUILD_EXTRA="buildDatapack"
+          ./gradlew build $BUILD_EXTRA
           echo "---- build/libs ----"
           ls -la build/libs/
           if [ -d build/datapack ]; then
@@ -118,7 +134,7 @@ jobs:
         run: |
           set -eo pipefail
           EXCLUDE="-x announceDiscord"
-          for task in ${{ inputs.configPackTasks }}; do
+          for task in ${{ steps.packTasks.outputs.tasks }}; do
             EXCLUDE="$EXCLUDE -x $task"
           done
           ./gradlew publishMods $EXCLUDE
@@ -213,7 +229,7 @@ jobs:
   config-pack:
     name: Publish Config Pack
     needs: release
-    if: inputs.configPackTasks != '' && needs.release.outputs.is_alpha != 'true'
+    if: inputs.configPack != '' && needs.release.outputs.is_alpha != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -234,7 +250,7 @@ jobs:
         run: |
           set -eo pipefail
           chmod +x gradlew
-          ./gradlew buildDatapack ${{ inputs.configPackTasks }}
+          ./gradlew buildDatapack ${{ needs.release.outputs.pack_tasks }}
         env:
           MODRINTH_API_KEY: ${{ secrets.MODRINTH_API_KEY }}
           CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
