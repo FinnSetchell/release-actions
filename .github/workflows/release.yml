@@ -124,8 +124,8 @@ jobs:
         id: releaseType
         shell: bash
         run: |
-          RELEASE_TYPE=$(grep -E '^releaseType=' gradle.properties | cut -d= -f2 | tr -d ' \r\n' || echo 'major')
-          RELEASE_TYPE=${RELEASE_TYPE:-major}
+          RELEASE_TYPE=$(grep -E '^releaseType=' gradle.properties | cut -d= -f2 | tr -d ' \r\n' || echo 'minor')
+          RELEASE_TYPE=${RELEASE_TYPE:-minor}
           echo "release_type=${RELEASE_TYPE}" >> "$GITHUB_OUTPUT"
           [ "$RELEASE_TYPE" = "alpha" ] && echo "is_alpha=true" >> "$GITHUB_OUTPUT" || echo "is_alpha=false" >> "$GITHUB_OUTPUT"
 
@@ -209,9 +209,11 @@ jobs:
               print(f'✓ stubbed CHANGELOG.md with ## [{new_v}] - {today}')
           gp = Path('gradle.properties')
           if gp.exists():
-              gp_text = re.sub(r'^discordPing=.*$', 'discordPing=true', gp.read_text(encoding='utf-8'), flags=re.MULTILINE)
+              gp_text = gp.read_text(encoding='utf-8')
+              gp_text = re.sub(r'^discordPing=.*$', 'discordPing=true', gp_text, flags=re.MULTILINE)
+              gp_text = re.sub(r'^releaseType=.*$', 'releaseType=minor', gp_text, flags=re.MULTILINE)
               gp.write_text(gp_text, encoding='utf-8')
-              print('✓ reset discordPing=true')
+              print('✓ reset discordPing=true, releaseType=minor')
           PYEOF
           git add gradle.properties CHANGELOG.md
           git commit -m "Post-release: bump ${OLD} -> ${NEW} + stub CHANGELOG section"
