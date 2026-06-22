@@ -7,6 +7,14 @@ on:
         description: 'Changelog body for this release'
         required: true
         type: string
+      configPack:
+        description: 'Config pack publish targets (forwarded to Worker for publish phase)'
+        type: string
+        default: ''
+      javaVersion:
+        description: 'Java version (forwarded to Worker for publish phase)'
+        type: string
+        default: '21'
     secrets:
       WORKER_API_KEY:
         required: true
@@ -17,6 +25,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set version from alpha tag
+        shell: bash
+        run: |
+          # Alpha tag format: 3.0.0-alpha.2-1.21.x → modVersion=3.0.0-alpha.2
+          ALPHA_VERSION=$(echo "${GITHUB_REF_NAME}" | grep -oP '^\d+\.\d+\.\d+-alpha\.\d+(?=-)' || true)
+          if [ -n "$ALPHA_VERSION" ]; then
+            sed -i "s|^modVersion=.*$|modVersion=${ALPHA_VERSION}|" gradle.properties
+            sed -i "s|^releaseType=.*$|releaseType=alpha|" gradle.properties
+            echo "Alpha build detected: modVersion set to ${ALPHA_VERSION}"
+          fi
 
       - name: Read gradle.properties
         id: props
@@ -42,6 +61,8 @@ jobs:
           EXTRA_RAW=$(get publishExtraMcVersions)
           EXTRA_JSON=$(echo "$EXTRA_RAW" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | jq -R . | jq -sc .)
           echo "mcExtra=${EXTRA_JSON:-[]}" >> "$GITHUB_OUTPUT"
+          MC=$(get minecraftVersion)
+          echo "branch=${MC}-datapack" >> "$GITHUB_OUTPUT"
 
       - name: Extract image URLs from changelog
         id: images
@@ -60,45 +81,53 @@ jobs:
           WORKER_API_KEY: ${{ secrets.WORKER_API_KEY }}
         run: |
           PAYLOAD=$(jq -n \
-            --arg project    "${{ github.repository }}" \
-            --arg modName    "${{ steps.props.outputs.modName }}" \
-            --arg version    "${{ steps.props.outputs.modVersion }}" \
-            --arg mcVersion  "${{ steps.props.outputs.mcVersion }}" \
-            --arg mcStart    "${{ steps.props.outputs.mcStart }}" \
-            --arg mcEnd      "${{ steps.props.outputs.mcEnd }}" \
+            --arg project     "${{ github.repository }}" \
+            --arg tag         "${{ github.ref_name }}" \
+            --arg branch      "${{ steps.props.outputs.branch }}" \
+            --arg configPack  "${{ inputs.configPack }}" \
+            --arg javaVersion "${{ inputs.javaVersion }}" \
+            --arg modName     "${{ steps.props.outputs.modName }}" \
+            --arg version     "${{ steps.props.outputs.modVersion }}" \
+            --arg mcVersion   "${{ steps.props.outputs.mcVersion }}" \
+            --arg mcStart     "${{ steps.props.outputs.mcStart }}" \
+            --arg mcEnd       "${{ steps.props.outputs.mcEnd }}" \
             --arg releaseType "${{ steps.props.outputs.releaseType }}" \
             --argjson discordPing "${{ steps.props.outputs.discordPing == 'true' && 'true' || 'false' }}" \
-            --arg cfSlug     "${{ steps.props.outputs.cfSlug }}" \
-            --arg mrSlug     "${{ steps.props.outputs.mrSlug }}" \
-            --arg bannerUrl  "${{ steps.props.outputs.bannerUrl }}" \
-            --arg avatarUrl  "${{ steps.props.outputs.avatarUrl }}" \
+            --arg cfSlug      "${{ steps.props.outputs.cfSlug }}" \
+            --arg mrSlug      "${{ steps.props.outputs.mrSlug }}" \
+            --arg bannerUrl   "${{ steps.props.outputs.bannerUrl }}" \
+            --arg avatarUrl   "${{ steps.props.outputs.avatarUrl }}" \
             --arg thumbnailUrl "${{ steps.props.outputs.thumbnailUrl }}" \
-            --arg color      "${{ steps.props.outputs.color }}" \
+            --arg color       "${{ steps.props.outputs.color }}" \
             --arg displayPrefix "${{ steps.props.outputs.displayPrefix }}" \
             --arg displaySuffix "${{ steps.props.outputs.displaySuffix }}" \
-            --arg changelog  "${{ steps.images.outputs.changelog }}" \
+            --arg changelog   "${{ steps.images.outputs.changelog }}" \
             --argjson imageUrls "${{ steps.images.outputs.imageUrls }}" \
             --argjson mcExtra "${{ steps.props.outputs.mcExtra }}" \
             '{
-              project: $project,
-              modName: $modName,
-              version: $version,
-              mcVersion: $mcVersion,
-              mcStart: $mcStart,
-              mcEnd: $mcEnd,
-              mcExtra: $mcExtra,
-              releaseType: $releaseType,
-              discordPing: $discordPing,
-              cfSlug: $cfSlug,
-              mrSlug: $mrSlug,
-              bannerUrl: $bannerUrl,
-              avatarUrl: $avatarUrl,
+              project:      $project,
+              tag:          $tag,
+              branch:       $branch,
+              configPack:   $configPack,
+              javaVersion:  $javaVersion,
+              modName:      $modName,
+              version:      $version,
+              mcVersion:    $mcVersion,
+              mcStart:      $mcStart,
+              mcEnd:        $mcEnd,
+              mcExtra:      $mcExtra,
+              releaseType:  $releaseType,
+              discordPing:  $discordPing,
+              cfSlug:       $cfSlug,
+              mrSlug:       $mrSlug,
+              bannerUrl:    $bannerUrl,
+              avatarUrl:    $avatarUrl,
               thumbnailUrl: $thumbnailUrl,
-              color: $color,
+              color:        $color,
               displayPrefix: $displayPrefix,
               displaySuffix: $displaySuffix,
-              changelog: $changelog,
-              imageUrls: $imageUrls
+              changelog:    $changelog,
+              imageUrls:    $imageUrls
             }')
 
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
@@ -109,5 +138,5 @@ jobs:
 
           echo "Worker responded: $HTTP_CODE"
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "::warning::Discord Worker returned $HTTP_CODE — announcement may not have posted"
+            echo "::warning::Discord Worker returned $HTTP_CODE — review card may not have posted"
           fi
