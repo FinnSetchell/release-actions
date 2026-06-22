@@ -1,0 +1,108 @@
+name: Discord Announce
+
+on:
+  workflow_call:
+    inputs:
+      changelog:
+        description: 'Changelog body for this release'
+        required: true
+        type: string
+    secrets:
+      WORKER_API_KEY:
+        required: true
+
+jobs:
+  announce:
+    name: Post to Discord review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read gradle.properties
+        id: props
+        shell: bash
+        run: |
+          get() { grep -E "^$1=" gradle.properties | cut -d= -f2 | tr -d ' \r\n'; }
+
+          echo "modName=$(get modName)"               >> "$GITHUB_OUTPUT"
+          echo "modVersion=$(get modVersion)"         >> "$GITHUB_OUTPUT"
+          echo "mcVersion=$(get minecraftVersion)"    >> "$GITHUB_OUTPUT"
+          echo "mcStart=$(get publishMcStart)"        >> "$GITHUB_OUTPUT"
+          echo "mcEnd=$(get publishMcEnd)"            >> "$GITHUB_OUTPUT"
+          echo "releaseType=$(get releaseType)"       >> "$GITHUB_OUTPUT"
+          echo "discordPing=$(get discordPing)"       >> "$GITHUB_OUTPUT"
+          echo "cfSlug=$(get curseforgeProjectSlug)"  >> "$GITHUB_OUTPUT"
+          echo "mrSlug=$(get modrinthProjectSlug)"    >> "$GITHUB_OUTPUT"
+          echo "bannerUrl=$(get discordBannerUrl)"    >> "$GITHUB_OUTPUT"
+          echo "avatarUrl=$(get discordAvatarUrl)"    >> "$GITHUB_OUTPUT"
+          echo "thumbnailUrl=$(get discordThumbnailUrl)" >> "$GITHUB_OUTPUT"
+          echo "color=$(get discordEmbedColor)"       >> "$GITHUB_OUTPUT"
+          echo "displayPrefix=$(get publishDisplayPrefix)" >> "$GITHUB_OUTPUT"
+          echo "displaySuffix=$(get publishDisplaySuffix)" >> "$GITHUB_OUTPUT"
+
+      - name: Extract image URLs from changelog
+        id: images
+        shell: bash
+        env:
+          CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          IMAGE_URLS=$(echo "$CHANGELOG" | grep -oP '!\[.*?\]\(\K[^)]+' | head -4 | jq -R . | jq -sc .)
+          CLEAN_CHANGELOG=$(echo "$CHANGELOG" | sed 's/!\[.*\]([^)]*)//g' | sed '/^[[:space:]]*$/d' | sed -e '${/^$/d}')
+          echo "imageUrls=$IMAGE_URLS" >> "$GITHUB_OUTPUT"
+          printf "changelog<<DELIM\n%s\nDELIM\n" "$CLEAN_CHANGELOG" >> "$GITHUB_OUTPUT"
+
+      - name: Send to Worker
+        shell: bash
+        env:
+          WORKER_API_KEY: ${{ secrets.WORKER_API_KEY }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg project    "${{ github.repository }}" \
+            --arg modName    "${{ steps.props.outputs.modName }}" \
+            --arg version    "${{ steps.props.outputs.modVersion }}" \
+            --arg mcVersion  "${{ steps.props.outputs.mcVersion }}" \
+            --arg mcStart    "${{ steps.props.outputs.mcStart }}" \
+            --arg mcEnd      "${{ steps.props.outputs.mcEnd }}" \
+            --arg releaseType "${{ steps.props.outputs.releaseType }}" \
+            --argjson discordPing "${{ steps.props.outputs.discordPing == 'true' && 'true' || 'false' }}" \
+            --arg cfSlug     "${{ steps.props.outputs.cfSlug }}" \
+            --arg mrSlug     "${{ steps.props.outputs.mrSlug }}" \
+            --arg bannerUrl  "${{ steps.props.outputs.bannerUrl }}" \
+            --arg avatarUrl  "${{ steps.props.outputs.avatarUrl }}" \
+            --arg thumbnailUrl "${{ steps.props.outputs.thumbnailUrl }}" \
+            --arg color      "${{ steps.props.outputs.color }}" \
+            --arg displayPrefix "${{ steps.props.outputs.displayPrefix }}" \
+            --arg displaySuffix "${{ steps.props.outputs.displaySuffix }}" \
+            --arg changelog  "${{ steps.images.outputs.changelog }}" \
+            --argjson imageUrls "${{ steps.images.outputs.imageUrls }}" \
+            '{
+              project: $project,
+              modName: $modName,
+              version: $version,
+              mcVersion: $mcVersion,
+              mcStart: $mcStart,
+              mcEnd: $mcEnd,
+              releaseType: $releaseType,
+              discordPing: $discordPing,
+              cfSlug: $cfSlug,
+              mrSlug: $mrSlug,
+              bannerUrl: $bannerUrl,
+              avatarUrl: $avatarUrl,
+              thumbnailUrl: $thumbnailUrl,
+              color: $color,
+              displayPrefix: $displayPrefix,
+              displaySuffix: $displaySuffix,
+              changelog: $changelog,
+              imageUrls: $imageUrls
+            }')
+
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST https://moogsmods-bot.finndog176.workers.dev/release \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: $WORKER_API_KEY" \
+            -d "$PAYLOAD")
+
+          echo "Worker responded: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::warning::Discord Worker returned $HTTP_CODE — announcement may not have posted"
+          fi
