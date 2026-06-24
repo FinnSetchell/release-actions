@@ -132,7 +132,7 @@ jobs:
         shell: bash
         run: |
           set -eo pipefail
-          EXCLUDE="-x announceDiscord"
+          EXCLUDE=""
           for task in ${{ steps.packTasks.outputs.tasks }}; do
             EXCLUDE="$EXCLUDE -x $task"
           done
