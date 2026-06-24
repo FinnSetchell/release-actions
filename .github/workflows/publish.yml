@@ -1,1 +1,259 @@
+name: Publish Release
 
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Git tag to publish (e.g. 3.0.1-1.21)'
+        type: string
+        required: true
+      releaseType:
+        description: 'Release type: major | minor | alpha'
+        type: string
+        required: true
+      releaseId:
+        description: 'Worker KV release ID — used to send the Discord announcement on completion'
+        type: string
+        required: true
+      configPack:
+        description: 'Config pack publish targets: "curseforge", "modrinth", or "curseforge modrinth". Empty = no config pack.'
+        type: string
+        default: ''
+      javaVersion:
+        description: 'Java version'
+        type: string
+        default: '21'
+    secrets:
+      MODRINTH_API_KEY:
+        required: true
+      CURSEFORGE_API_KEY:
+        required: true
+      WORKER_API_KEY:
+        required: true
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    outputs:
+      pack_tasks: ${{ steps.packTasks.outputs.tasks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set version and releaseType
+        shell: bash
+        run: |
+          # Alpha tag format: 3.0.0-alpha.2-1.21.x -> modVersion=3.0.0-alpha.2
+          ALPHA_VERSION=$(echo "${{ inputs.tag }}" | grep -oP '^\d+\.\d+\.\d+-alpha\.\d+(?=-)' || true)
+          if [ -n "$ALPHA_VERSION" ]; then
+            sed -i "s|^modVersion=.*$|modVersion=${ALPHA_VERSION}|" gradle.properties
+            echo "Alpha build: modVersion set to ${ALPHA_VERSION}"
+          fi
+          # Always override releaseType with the modal-approved value
+          sed -i "s|^releaseType=.*$|releaseType=${{ inputs.releaseType }}|" gradle.properties
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.javaVersion }}
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Resolve config-pack tasks
+        id: packTasks
+        shell: bash
+        run: |
+          TASKS=""
+          for p in ${{ inputs.configPack }}; do
+            case "$p" in
+              curseforge) TASKS="$TASKS publishCurseforgeDatapack" ;;
+              modrinth)   TASKS="$TASKS publishModrinthDatapack" ;;
+            esac
+          done
+          echo "tasks=${TASKS# }" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -eo pipefail
+          chmod +x gradlew
+          BUILD_EXTRA=""
+          [ -n "${{ steps.packTasks.outputs.tasks }}" ] && BUILD_EXTRA="buildDatapack"
+          ./gradlew build $BUILD_EXTRA
+          echo "---- build/libs ----"
+          ls -la build/libs/
+          if [ -d build/datapack ]; then
+            echo "---- build/datapack ----"
+            ls -la build/datapack/
+          fi
+
+      - name: Extract Changelog
+        id: changelog
+        shell: bash
+        run: |
+          VERSION=$(grep -E '^(modVersion|version|mod_version)=' gradle.properties | head -1 | cut -d= -f2 | tr -d '[:space:]')
+          extract_changelog() {
+            local ver="$1"
+            awk -v v="$ver" '$0 ~ "^## [[]?" v "($|[^-])" { capture=1; next } /^## / && capture { exit } capture { print }' CHANGELOG.md
+          }
+          BODY=$(extract_changelog "$VERSION")
+          # Alpha fallback: if no entry for X.Y.Z-alpha.N, try the base X.Y.Z entry
+          if [ -z "$BODY" ] && echo "$VERSION" | grep -qP '-alpha\.\d+$'; then
+            STABLE_VERSION=$(echo "$VERSION" | sed 's/-alpha\.[0-9]*//')
+            BODY=$(extract_changelog "$STABLE_VERSION")
+          fi
+          printf "body<<DELIMITER\n%s\nDELIMITER\n" "$BODY" >> "$GITHUB_OUTPUT"
+
+      - name: Build release title
+        id: release_meta
+        shell: bash
+        env:
+          IS_ALPHA: ${{ inputs.releaseType == 'alpha' }}
+          CHANGELOG_BODY: ${{ steps.changelog.outputs.body }}
+        run: |
+          if [ "$IS_ALPHA" = "true" ]; then
+            TITLE="${{ inputs.tag }} (Alpha)"
+            BANNER="> 🧪 **Alpha test build.** Feedback welcome at https://github.com/${GITHUB_REPOSITORY}/issues."
+            BODY=$(printf "%s\n\n%s" "$BANNER" "$CHANGELOG_BODY")
+          else
+            TITLE="${{ inputs.tag }}"
+            BODY="$CHANGELOG_BODY"
+          fi
+          echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+          printf "body<<DELIMITER\n%s\nDELIMITER\n" "$BODY" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to CurseForge & Modrinth
+        shell: bash
+        run: |
+          set -eo pipefail
+          EXCLUDE="-x announceDiscord"
+          for task in ${{ steps.packTasks.outputs.tasks }}; do
+            EXCLUDE="$EXCLUDE -x $task"
+          done
+          ./gradlew publishMods $EXCLUDE
+        env:
+          MODRINTH_API_KEY: ${{ secrets.MODRINTH_API_KEY }}
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+          DISCORD_WEBHOOK: "skip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ steps.release_meta.outputs.title }}
+          body: ${{ steps.release_meta.outputs.body }}
+          prerelease: ${{ inputs.releaseType == 'alpha' }}
+          files: |
+            build/libs/*.jar
+            build/datapack/*.zip
+          fail_on_unmatched_files: false
+
+      - name: Notify Worker
+        if: always()
+        shell: bash
+        env:
+          RELEASE_ID: ${{ inputs.releaseId }}
+          WORKER_API_KEY: ${{ secrets.WORKER_API_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          SUCCESS="false"
+          [ "$JOB_STATUS" = "success" ] && SUCCESS="true"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "https://moogsmods-bot.finndog176.workers.dev/published" \
+            -H "X-API-Key: $WORKER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"releaseId\":\"$RELEASE_ID\",\"success\":$SUCCESS}")
+          echo "Worker /published: $HTTP_CODE"
+
+      - name: Bump version for next release
+        shell: bash
+        run: |
+          MC=$(grep '^minecraftVersion=' gradle.properties | cut -d= -f2)
+          BRANCH="${MC}-datapack"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$BRANCH"
+          git checkout "$BRANCH"
+          OLD=$(grep '^modVersion=' gradle.properties | cut -d= -f2)
+
+          if echo "$OLD" | grep -qP '^\d+\.\d+\.\d+-alpha\.\d+$'; then
+            BASE=$(echo "$OLD" | sed 's/-alpha\..*//')
+            N=$(echo "$OLD" | grep -oP '\d+$')
+            NEW="${BASE}-alpha.$((N+1))"
+            sed -i "s|^modVersion=.*$|modVersion=${NEW}|" gradle.properties
+            git add gradle.properties
+            git commit -m "Post-alpha: bump ${OLD} -> ${NEW}"
+          else
+            TODAY=$(date -u +%Y-%m-%d)
+            IFS='.' read -r -a P <<< "$OLD"
+            NEW="${P[0]}.${P[1]}.$((P[2]+1))"
+            sed -i "s|^modVersion=.*$|modVersion=${NEW}|" gradle.properties
+            NEW_VERSION="$NEW" RELEASE_DATE="$TODAY" python3 - <<'PYEOF'
+          import os, re
+          from pathlib import Path
+          new_v = os.environ['NEW_VERSION']
+          today = os.environ['RELEASE_DATE']
+          stub = (
+              f"## [{new_v}] - {today}\n\n"
+              "_Pending. Update this header date and replace this line with the actual changes before tagging._\n\n"
+              "---\n\n"
+          )
+          p = Path('CHANGELOG.md')
+          if p.exists():
+              content = p.read_text(encoding='utf-8')
+              match = re.search(r'# Changelog(?:\r?\n)+---(?:\r?\n)+', content)
+              if match:
+                  end = match.end()
+                  content = content[:end] + stub + content[end:]
+              else:
+                  content = stub + content
+              p.write_text(content, encoding='utf-8')
+              print(f'stubbed CHANGELOG.md with ## [{new_v}] - {today}')
+          gp = Path('gradle.properties')
+          if gp.exists():
+              gp_text = gp.read_text(encoding='utf-8')
+              gp_text = re.sub(r'^discordPing=.*$', 'discordPing=true', gp_text, flags=re.MULTILINE)
+              gp_text = re.sub(r'^releaseType=.*$', 'releaseType=minor', gp_text, flags=re.MULTILINE)
+              gp.write_text(gp_text, encoding='utf-8')
+              print('reset discordPing=true, releaseType=minor')
+          PYEOF
+            git add gradle.properties CHANGELOG.md
+            git commit -m "Post-release: bump ${OLD} -> ${NEW} + stub CHANGELOG section"
+          fi
+
+          git push origin "$BRANCH"
+
+  config-pack:
+    name: Publish Config Pack
+    needs: publish
+    if: inputs.configPack != '' && inputs.releaseType != 'alpha'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.javaVersion }}
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build and publish config pack
+        shell: bash
+        run: |
+          set -eo pipefail
+          chmod +x gradlew
+          ./gradlew buildDatapack ${{ needs.publish.outputs.pack_tasks }}
+        env:
+          MODRINTH_API_KEY: ${{ secrets.MODRINTH_API_KEY }}
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
