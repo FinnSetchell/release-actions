@@ -48,49 +48,23 @@ jobs:
       - name: Run validator
         run: python validator/validator.py --config project/validator.json --project-root project
 
-  build:
-    name: Build
-    runs-on: ubuntu-latest
+  changelog:
+    name: Extract Changelog
     needs: [validate]
     if: always() && (needs.validate.result == 'success' || needs.validate.result == 'skipped')
+    runs-on: ubuntu-latest
     outputs:
-      changelog: ${{ steps.changelog.outputs.body }}
+      body: ${{ steps.changelog.outputs.body }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Set version from alpha tag
         shell: bash
         run: |
-          # Alpha tag format: 3.0.0-alpha.2-1.21.x → modVersion=3.0.0-alpha.2
           ALPHA_VERSION=$(echo "${GITHUB_REF_NAME}" | grep -oP '^\d+\.\d+\.\d+-alpha\.\d+(?=-)' || true)
           if [ -n "$ALPHA_VERSION" ]; then
             sed -i "s|^modVersion=.*$|modVersion=${ALPHA_VERSION}|" gradle.properties
             sed -i "s|^releaseType=.*$|releaseType=alpha|" gradle.properties
-            echo "Alpha build detected: modVersion set to ${ALPHA_VERSION}"
-          fi
-
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ inputs.javaVersion }}
-          distribution: 'temurin'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Build
-        shell: bash
-        run: |
-          set -eo pipefail
-          chmod +x gradlew
-          BUILD_EXTRA=""
-          [ -n "${{ inputs.configPack }}" ] && BUILD_EXTRA="buildDatapack"
-          ./gradlew build $BUILD_EXTRA
-          echo "---- build/libs ----"
-          ls -la build/libs/
-          if [ -d build/datapack ]; then
-            echo "---- build/datapack ----"
-            ls -la build/datapack/
           fi
 
       - name: Extract Changelog
@@ -103,7 +77,6 @@ jobs:
             awk -v v="$ver" '$0 ~ "^## [[]?" v "($|[^-])" { capture=1; next } /^## / && capture { exit } capture { print }' CHANGELOG.md
           }
           BODY=$(extract_changelog "$VERSION")
-          # Alpha fallback: if no entry for X.Y.Z-alpha.N, try the base X.Y.Z entry
           if [ -z "$BODY" ] && echo "$VERSION" | grep -qP '-alpha\.\d+$'; then
             STABLE_VERSION=$(echo "$VERSION" | sed 's/-alpha\.[0-9]*//')
             BODY=$(extract_changelog "$STABLE_VERSION")
@@ -112,10 +85,10 @@ jobs:
 
   discord:
     name: Discord Review
-    needs: build
+    needs: changelog
     uses: FinnSetchell/release-actions/.github/workflows/discord-announce.yml@v1
     with:
-      changelog:   ${{ needs.build.outputs.changelog }}
+      changelog:   ${{ needs.changelog.outputs.body }}
       configPack:  ${{ inputs.configPack }}
       javaVersion: ${{ inputs.javaVersion }}
     secrets:
