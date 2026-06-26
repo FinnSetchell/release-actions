@@ -1,0 +1,70 @@
+name: Verify publish
+
+# Reusable workflow: confirms a just-published release actually landed on both
+# Modrinth and CurseForge for every enabled loader + MC version, and alerts the
+# Discord bot on failure. Called as a job from publish.yml (after the publish
+# job, with if: !cancelled() so it still runs when a mid-publish failure turns
+# the publish job red). Also callable standalone from any mod's pipeline:
+#
+#   verify:
+#     needs: publish
+#     if: ${{ !cancelled() }}
+#     uses: FinnSetchell/release-actions/.github/workflows/verify.yml@v1
+#     with:
+#       tag: ${{ inputs.tag }}
+#     secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag that was just published (e.g. 3.0.1-1.21.x)'
+        type: string
+        required: true
+      mod_name:
+        description: 'Display name for the alert (defaults to modName in gradle.properties)'
+        type: string
+        default: ''
+      worker_url:
+        description: 'Discord bot base URL'
+        type: string
+        default: 'https://moogsmods-bot.finndog176.workers.dev'
+      fail_on:
+        description: "Fail the job on 'fail' (default) or also on 'pending'"
+        type: string
+        default: 'fail'
+    secrets:
+      WORKER_API_KEY:
+        required: true
+
+jobs:
+  verify:
+    name: Verify Modrinth + CurseForge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout mod at tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Checkout verification library
+        uses: actions/checkout@v4
+        with:
+          repository: FinnSetchell/release-actions
+          ref: v1
+          path: .verify-lib
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify publish landed on both platforms
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          MOD_NAME: ${{ inputs.mod_name }}
+          WORKER_URL: ${{ inputs.worker_url }}
+          WORKER_API_KEY: ${{ secrets.WORKER_API_KEY }}
+          FAIL_ON: ${{ inputs.fail_on }}
+        run: python .verify-lib/verify/verify_publish.py

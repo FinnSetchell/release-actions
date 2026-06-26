@@ -229,6 +229,19 @@ jobs:
 
           git push origin "$BRANCH"
 
+  verify:
+    name: Verify publish
+    needs: publish
+    # Runs even when the publish job goes red mid-publish (e.g. CurseForge fails
+    # after Modrinth succeeds) — that's exactly the gap we need to catch. Posts a
+    # Discord alert and fails this job on a real miss, while leaving a transient
+    # CurseForge API hiccup non-fatal.
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/verify.yml
+    with:
+      tag: ${{ inputs.tag }}
+    secrets: inherit
+
   config-pack:
     name: Publish Config Pack
     needs: publish
