@@ -41,7 +41,7 @@ jobs:
         id: props
         shell: bash
         run: |
-          get() { grep -E "^$1=" gradle.properties | cut -d= -f2 | tr -d ' \r\n'; }
+          get() { grep -E "^$1=" gradle.properties | cut -d= -f2 | tr -d ' \r\n' || true; }
 
           echo "modName=$(get modName)"               >> "$GITHUB_OUTPUT"
           echo "modVersion=$(get modVersion)"         >> "$GITHUB_OUTPUT"
