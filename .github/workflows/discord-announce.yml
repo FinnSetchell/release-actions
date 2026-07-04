@@ -79,31 +79,54 @@ jobs:
         shell: bash
         env:
           WORKER_API_KEY: ${{ secrets.WORKER_API_KEY }}
+          PROJECT:        ${{ github.repository }}
+          TAG:            ${{ github.ref_name }}
+          BRANCH:         ${{ steps.props.outputs.branch }}
+          CONFIG_PACK:    ${{ inputs.configPack }}
+          JAVA_VERSION:   ${{ inputs.javaVersion }}
+          MOD_NAME:       ${{ steps.props.outputs.modName }}
+          VERSION:        ${{ steps.props.outputs.modVersion }}
+          MC_VERSION:     ${{ steps.props.outputs.mcVersion }}
+          MC_START:       ${{ steps.props.outputs.mcStart }}
+          MC_END:         ${{ steps.props.outputs.mcEnd }}
+          RELEASE_TYPE:   ${{ steps.props.outputs.releaseType }}
+          DISCORD_PING:   ${{ steps.props.outputs.discordPing == 'true' && 'true' || 'false' }}
+          CF_SLUG:        ${{ steps.props.outputs.cfSlug }}
+          MR_SLUG:        ${{ steps.props.outputs.mrSlug }}
+          BANNER_URL:     ${{ steps.props.outputs.bannerUrl }}
+          AVATAR_URL:     ${{ steps.props.outputs.avatarUrl }}
+          THUMBNAIL_URL:  ${{ steps.props.outputs.thumbnailUrl }}
+          COLOR:          ${{ steps.props.outputs.color }}
+          DISPLAY_PREFIX: ${{ steps.props.outputs.displayPrefix }}
+          DISPLAY_SUFFIX: ${{ steps.props.outputs.displaySuffix }}
+          CHANGELOG_BODY: ${{ steps.images.outputs.changelog }}
+          IMAGE_URLS:     ${{ steps.images.outputs.imageUrls }}
+          MC_EXTRA:       ${{ steps.props.outputs.mcExtra }}
         run: |
           PAYLOAD=$(jq -n \
-            --arg project     "${{ github.repository }}" \
-            --arg tag         "${{ github.ref_name }}" \
-            --arg branch      "${{ steps.props.outputs.branch }}" \
-            --arg configPack  "${{ inputs.configPack }}" \
-            --arg javaVersion "${{ inputs.javaVersion }}" \
-            --arg modName     "${{ steps.props.outputs.modName }}" \
-            --arg version     "${{ steps.props.outputs.modVersion }}" \
-            --arg mcVersion   "${{ steps.props.outputs.mcVersion }}" \
-            --arg mcStart     "${{ steps.props.outputs.mcStart }}" \
-            --arg mcEnd       "${{ steps.props.outputs.mcEnd }}" \
-            --arg releaseType "${{ steps.props.outputs.releaseType }}" \
-            --argjson discordPing "${{ steps.props.outputs.discordPing == 'true' && 'true' || 'false' }}" \
-            --arg cfSlug      "${{ steps.props.outputs.cfSlug }}" \
-            --arg mrSlug      "${{ steps.props.outputs.mrSlug }}" \
-            --arg bannerUrl   "${{ steps.props.outputs.bannerUrl }}" \
-            --arg avatarUrl   "${{ steps.props.outputs.avatarUrl }}" \
-            --arg thumbnailUrl "${{ steps.props.outputs.thumbnailUrl }}" \
-            --arg color       "${{ steps.props.outputs.color }}" \
-            --arg displayPrefix "${{ steps.props.outputs.displayPrefix }}" \
-            --arg displaySuffix "${{ steps.props.outputs.displaySuffix }}" \
-            --arg changelog   "${{ steps.images.outputs.changelog }}" \
-            --argjson imageUrls "${{ steps.images.outputs.imageUrls }}" \
-            --argjson mcExtra "${{ steps.props.outputs.mcExtra }}" \
+            --arg project     "$PROJECT" \
+            --arg tag         "$TAG" \
+            --arg branch      "$BRANCH" \
+            --arg configPack  "$CONFIG_PACK" \
+            --arg javaVersion "$JAVA_VERSION" \
+            --arg modName     "$MOD_NAME" \
+            --arg version     "$VERSION" \
+            --arg mcVersion   "$MC_VERSION" \
+            --arg mcStart     "$MC_START" \
+            --arg mcEnd       "$MC_END" \
+            --arg releaseType "$RELEASE_TYPE" \
+            --argjson discordPing "$DISCORD_PING" \
+            --arg cfSlug      "$CF_SLUG" \
+            --arg mrSlug      "$MR_SLUG" \
+            --arg bannerUrl   "$BANNER_URL" \
+            --arg avatarUrl   "$AVATAR_URL" \
+            --arg thumbnailUrl "$THUMBNAIL_URL" \
+            --arg color       "$COLOR" \
+            --arg displayPrefix "$DISPLAY_PREFIX" \
+            --arg displaySuffix "$DISPLAY_SUFFIX" \
+            --arg changelog   "$CHANGELOG_BODY" \
+            --argjson imageUrls "$IMAGE_URLS" \
+            --argjson mcExtra "$MC_EXTRA" \
             '{
               project:      $project,
               tag:          $tag,
