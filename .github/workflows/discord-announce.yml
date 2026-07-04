@@ -59,7 +59,7 @@ jobs:
           echo "displayPrefix=$(get publishDisplayPrefix)" >> "$GITHUB_OUTPUT"
           echo "displaySuffix=$(get publishDisplaySuffix)" >> "$GITHUB_OUTPUT"
           EXTRA_RAW=$(get publishExtraMcVersions)
-          EXTRA_JSON=$(echo "$EXTRA_RAW" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | jq -R . | jq -sc .)
+          EXTRA_JSON=$(echo "$EXTRA_RAW" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | { grep -v '^$' || true; } | jq -R . | jq -sc .)
           echo "mcExtra=${EXTRA_JSON:-[]}" >> "$GITHUB_OUTPUT"
           MC=$(get minecraftVersion)
           echo "branch=${MC}-datapack" >> "$GITHUB_OUTPUT"
