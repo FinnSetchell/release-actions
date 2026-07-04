@@ -169,8 +169,9 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg releaseId "$RELEASE_ID" \
             --argjson success "$SUCCESS" \
+            --argjson announce "$SUCCESS" \
             --arg ping "$PING" \
-            '{releaseId: $releaseId, success: $success, ping: $ping}')
+            '{releaseId: $releaseId, success: $success, announce: $announce, ping: $ping}')
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             -X POST "https://moogsmods-bot.finndog176.workers.dev/published" \
             -H "X-API-Key: $WORKER_API_KEY" \
