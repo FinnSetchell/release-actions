@@ -70,7 +70,7 @@ jobs:
         env:
           CHANGELOG: ${{ inputs.changelog }}
         run: |
-          IMAGE_URLS=$(echo "$CHANGELOG" | grep -oP '!\[.*?\]\(\K[^)]+' | head -4 | jq -R . | jq -sc .)
+          IMAGE_URLS=$(echo "$CHANGELOG" | { grep -oP '!\[.*?\]\(\K[^)]+' || true; } | head -4 | jq -R . | jq -sc .)
           CLEAN_CHANGELOG=$(echo "$CHANGELOG" | sed 's/!\[.*\]([^)]*)//g' | sed '/^[[:space:]]*$/d' | sed -e '${/^$/d}')
           echo "imageUrls=$IMAGE_URLS" >> "$GITHUB_OUTPUT"
           printf "changelog<<DELIM\n%s\nDELIM\n" "$CLEAN_CHANGELOG" >> "$GITHUB_OUTPUT"
