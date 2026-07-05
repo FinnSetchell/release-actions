@@ -251,7 +251,8 @@ jobs:
     uses: ./.github/workflows/verify.yml
     with:
       tag: ${{ inputs.tag }}
-    secrets: inherit
+    secrets:
+      WORKER_API_KEY: ${{ secrets.WORKER_API_KEY }}
 
   config-pack:
     name: Publish Config Pack
