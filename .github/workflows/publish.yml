@@ -174,8 +174,11 @@ jobs:
       - name: Bump version for next release
         shell: bash
         run: |
-          MC=$(grep '^minecraftVersion=' gradle.properties | cut -d= -f2)
-          BRANCH="${MC}-datapack"
+          BRANCH=$(grep '^branchName=' gradle.properties | cut -d= -f2 | tr -d '\r\n ' || true)
+          if [ -z "$BRANCH" ]; then
+            MC=$(grep -E '^(minecraftVersion|minecraft_version)=' gradle.properties | head -1 | cut -d= -f2 | tr -d '[:space:]')
+            BRANCH="${MC}-datapack"
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin "$BRANCH"
