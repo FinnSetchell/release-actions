@@ -62,7 +62,12 @@ jobs:
           EXTRA_JSON=$(echo "$EXTRA_RAW" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | { grep -v '^$' || true; } | jq -R . | jq -sc .)
           echo "mcExtra=${EXTRA_JSON:-[]}" >> "$GITHUB_OUTPUT"
           MC=$(get minecraftVersion)
-          echo "branch=${MC}-datapack" >> "$GITHUB_OUTPUT"
+          BRANCH_PROP=$(get publishBranch)
+          if [ -n "$BRANCH_PROP" ]; then
+            echo "branch=$BRANCH_PROP" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch=${MC}-datapack" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Extract image URLs from changelog
         id: images
