@@ -86,6 +86,7 @@ jobs:
   discord:
     name: Discord Review
     needs: changelog
+    if: always() && needs.changelog.result == 'success'
     uses: FinnSetchell/release-actions/.github/workflows/discord-announce.yml@v1
     with:
       changelog:   ${{ needs.changelog.outputs.body }}
