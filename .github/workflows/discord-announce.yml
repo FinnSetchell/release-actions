@@ -63,8 +63,14 @@ jobs:
           echo "mcExtra=${EXTRA_JSON:-[]}" >> "$GITHUB_OUTPUT"
           MC=$(get minecraftVersion)
           BRANCH_PROP=$(get publishBranch)
+          BRANCH_NAME_PROP=$(get branchName)
+          # publish.yml's version-bump step reads branchName, not publishBranch, so
+          # that's the real source of truth for most mods. publishBranch stays first
+          # for repos that set it explicitly (e.g. non-standard branch naming).
           if [ -n "$BRANCH_PROP" ]; then
             echo "branch=$BRANCH_PROP" >> "$GITHUB_OUTPUT"
+          elif [ -n "$BRANCH_NAME_PROP" ]; then
+            echo "branch=$BRANCH_NAME_PROP" >> "$GITHUB_OUTPUT"
           else
             echo "branch=${MC}-datapack" >> "$GITHUB_OUTPUT"
           fi

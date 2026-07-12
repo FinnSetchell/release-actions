@@ -23,12 +23,16 @@ of false reds. Real misses/rejections still fail.
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import verifier  # noqa: E402
+
+# Loaders we know how to detect via settings.gradle(.kts) `include(...)` heuristic.
+KNOWN_LOADERS = ("fabric", "forge", "neoforge", "quilt")
 
 
 def read_props(path="gradle.properties"):
@@ -54,12 +58,51 @@ def expected_mc(props):
     return list(dict.fromkeys(mc))  # dedupe, preserve order
 
 
+def expected_platforms(props):
+    """Which loaders should have been published for this tag.
+
+    Priority: explicit `publishLoaders=fabric,neoforge` in gradle.properties
+    (authoritative, set by the mod repo). Otherwise fall back to a heuristic
+    that reads settings.gradle(.kts) for `include('<loader>')` modules, since
+    that's checked out at the same tag being verified. Only if neither signal
+    is available do we fall back to the old fabric+forge+neoforge default -
+    and that fallback should be rare, since it's exactly what caused false
+    "missing forge" failures on fabric+neoforge-only branches.
+    """
+    explicit = props.get("publishLoaders", "")
+    if explicit.strip():
+        return [x.strip() for x in explicit.split(",") if x.strip()]
+
+    text = ""
+    for fname in ("settings.gradle", "settings.gradle.kts"):
+        try:
+            with open(fname, encoding="utf-8") as fh:
+                text += fh.read()
+        except FileNotFoundError:
+            continue
+
+    found = [loader for loader in KNOWN_LOADERS
+             if re.search(rf"include\(\s*['\"]{loader}['\"]\s*\)", text)]
+    if found:
+        return found
+
+    return ["fabric", "forge", "neoforge"]
+
+
 def post_alert(worker_url, api_key, payload):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         worker_url.rstrip("/") + "/verify-alert",
         data=data,
-        headers={"Content-Type": "application/json", "X-API-Key": api_key},
+        # urllib's default User-Agent ("Python-urllib/x.y") gets a 403 from
+        # Cloudflare in front of the worker; publish.yml's curl POST to /published
+        # uses the same X-API-Key header and succeeds, the difference being curl's
+        # User-Agent. Send a normal-looking one so this request isn't edge-blocked.
+        headers={
+            "Content-Type": "application/json",
+            "X-API-Key": api_key,
+            "User-Agent": verifier.USER_AGENT,
+        },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -88,6 +131,17 @@ def main():
         print("::error::gradle.properties not found in working directory")
         return 3
 
+    # The tag's own <version>-<mc> vs <mc>-<version> ordering is ambiguous across
+    # the mod family (some repos tag "3.0.1-1.21.1", others "26.1.2-3.0.3" -mc
+    # first) - when both halves are bare X.Y.Z numbers, DEFAULT_TAG_PATTERN's
+    # regex has no way to tell them apart and can grab the MC label as "version".
+    # gradle.properties at the checked-out tag is unambiguous and authoritative
+    # (it's exactly what got built and published), so prefer modVersion/releaseType
+    # from there and only fall back to the tag-parsed value if props lack them.
+    mod_version = props.get("modVersion", "").strip() or parsed["version"]
+    is_alpha = props.get("releaseType", "").strip().lower() == "alpha" \
+        or "-alpha." in mod_version or parsed["is_alpha"]
+
     modrinth_id = props.get("modrinthProjectId")
     curseforge_id = props.get("curseforgeProjectId")
     if not modrinth_id or not curseforge_id:
@@ -103,10 +157,10 @@ def main():
         mod_key=props.get("modId", modrinth_id),
         modrinth_id=modrinth_id,
         curseforge_id=curseforge_id,
-        mod_version=parsed["version"],
-        platforms=["fabric", "forge", "neoforge"],
+        mod_version=mod_version,
+        platforms=expected_platforms(props),
         expected_mc=mc,
-        is_alpha=parsed["is_alpha"],
+        is_alpha=is_alpha,
     )
 
     # Enrich the payload so the bot can render a rich embed.

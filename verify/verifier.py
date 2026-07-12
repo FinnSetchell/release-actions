@@ -65,6 +65,29 @@ CF_RELEASE_TYPE = {"release": 1, "beta": 2, "alpha": 3}
 # Loader name as it appears in CurseForge `gameVersions` (capitalized).
 CF_LOADER_NAME = {"fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge", "quilt": "Quilt"}
 
+# How many times to re-check Modrinth before declaring a version truly missing,
+# and how long to wait between tries. A just-published version can take a few
+# seconds to show up on GET /project/{id}/version, and a false "missing" here
+# would alert on a release that actually landed fine.
+MODRINTH_MISSING_RETRIES = 3
+MODRINTH_MISSING_RETRY_DELAY = 20
+
+
+def _mc_variants(mc):
+    """MC 26.x names releases 'X.Y.0' as 'X.Y' everywhere except gradle.properties
+    (mod-publish-plugin publishes the Mojang alias). Treat both forms as equal."""
+    parts = mc.split(".")
+    variants = {mc}
+    if len(parts) == 3 and parts[2] == "0":
+        variants.add(".".join(parts[:2]))
+    elif len(parts) == 2:
+        variants.add(mc + ".0")
+    return variants
+
+
+def _mc_covered(mc, game_versions):
+    return bool(_mc_variants(mc) & set(game_versions))
+
 
 # ─────────────────────────── HTTP ───────────────────────────
 
@@ -107,19 +130,28 @@ def check_modrinth(project_id, mod_version, platforms, expected_mc, is_alpha):
         "url": f"https://modrinth.com/mod/{project_id}/version/{mod_version}",
         "error": None,
     }
-    versions, err = _get_json(f"{MODRINTH_API}/project/{project_id}/version")
-    if err:
-        result["status"] = "error"
-        result["error"] = err
-        return result
+    # A version fetched via the direct project/version endpoint can still lag a
+    # few seconds behind mod-publish-plugin's upload finishing, so retry a bounded
+    # number of times before declaring the version genuinely absent.
+    same_number = []
+    for attempt in range(MODRINTH_MISSING_RETRIES):
+        versions, err = _get_json(f"{MODRINTH_API}/project/{project_id}/version")
+        if err:
+            result["status"] = "error"
+            result["error"] = err
+            return result
 
-    # The SAME version_number is published once per MC line (e.g. "3.0.0" exists
-    # as a 1.20 version and a 1.21 version, each with its own game_versions). So
-    # evaluate every same-numbered version and accept the one that best covers the
-    # expected loaders + MC; picking the first match would check the wrong line.
-    same_number = [v for v in versions if v.get("version_number") == mod_version]
+        # The SAME version_number is published once per MC line (e.g. "3.0.0" exists
+        # as a 1.20 version and a 1.21 version, each with its own game_versions). So
+        # evaluate every same-numbered version and accept the one that best covers the
+        # expected loaders + MC; picking the first match would check the wrong line.
+        same_number = [v for v in versions if v.get("version_number") == mod_version]
+        if same_number or attempt == MODRINTH_MISSING_RETRIES - 1:
+            break
+        time.sleep(MODRINTH_MISSING_RETRY_DELAY)
+
     if not same_number:
-        return result  # genuinely absent
+        return result  # genuinely absent after retries
 
     typed = [v for v in same_number if v.get("version_type") == want_type]
     if not typed:
@@ -132,22 +164,27 @@ def check_modrinth(project_id, mod_version, platforms, expected_mc, is_alpha):
         )
         return result
 
-    best_missing = None
-    for v in typed:
-        loaders = set(v.get("loaders", []))
-        game_versions = set(v.get("game_versions", []))
-        missing_loaders = [p for p in platforms if p not in loaders]
-        missing_mc = [mc for mc in expected_mc if mc not in game_versions]
-        if best_missing is None or (len(missing_loaders) + len(missing_mc)) < \
-                (len(best_missing[0]) + len(best_missing[1])):
-            best_missing = (missing_loaders, missing_mc)
-        if not missing_loaders and not missing_mc:
-            break
+    # mod-publish-plugin can upload one Modrinth version object per loader (same
+    # version_number + game_versions, but only one loader each) rather than a
+    # single multi-loader object. So coverage of a (platform, mc) cell must be
+    # checked across the UNION of all typed entries, not any single "best" one -
+    # otherwise a fully-published release false-positives as "incomplete" because
+    # no single entry lists every loader.
+    missing_cells = []
+    for platform in platforms:
+        for mc in expected_mc:
+            covered = any(
+                platform in set(v.get("loaders", [])) and _mc_covered(mc, v.get("game_versions", []))
+                for v in typed
+            )
+            if not covered:
+                missing_cells.append((platform, mc))
 
     result["found"] = True
     result["version_type"] = want_type
-    result["missing_loaders"], result["missing_mc"] = best_missing
-    if not best_missing[0] and not best_missing[1]:
+    result["missing_loaders"] = sorted({p for p, _ in missing_cells})
+    result["missing_mc"] = sorted({mc for _, mc in missing_cells})
+    if not missing_cells:
         result["status"] = "ok"
         result["ok"] = True
     else:
@@ -215,7 +252,7 @@ def check_curseforge(mod_id, mod_version, platforms, expected_mc, is_alpha):
             hit = None
             for f in candidates:
                 gv = f.get("gameVersions", [])
-                if loader_name in gv and mc in gv:
+                if loader_name in gv and _mc_covered(mc, gv):
                     hit = f
                     break
             if hit is None:
