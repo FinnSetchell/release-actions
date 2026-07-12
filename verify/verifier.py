@@ -143,8 +143,9 @@ def check_modrinth(project_id, mod_version, platforms, expected_mc, is_alpha):
     }
     # A version fetched via the direct project/version endpoint can still lag a
     # few seconds behind mod-publish-plugin's upload finishing, so retry a bounded
-    # number of times before declaring the version genuinely absent.
-    same_number = []
+    # number of times before declaring the version genuinely missing or its
+    # coverage genuinely incomplete - a just-uploaded entry for one loader/mc
+    # can still be absent from the list moments after the others appeared.
     for attempt in range(MODRINTH_MISSING_RETRIES):
         versions, err = _get_json(f"{MODRINTH_API}/project/{project_id}/version")
         if err:
@@ -157,49 +158,55 @@ def check_modrinth(project_id, mod_version, platforms, expected_mc, is_alpha):
         # evaluate every same-numbered version and accept the one that best covers the
         # expected loaders + MC; picking the first match would check the wrong line.
         same_number = [v for v in versions if v.get("version_number") == mod_version]
-        if same_number or attempt == MODRINTH_MISSING_RETRIES - 1:
-            break
+        last_attempt = attempt == MODRINTH_MISSING_RETRIES - 1
+
+        if not same_number:
+            if last_attempt:
+                return result  # genuinely absent after retries
+            time.sleep(MODRINTH_MISSING_RETRY_DELAY)
+            continue
+
+        typed = [v for v in same_number if v.get("version_type") == want_type]
+        if not typed:
+            # Exists but published under a different type than the tag implies.
+            result["status"] = "wrong_type"
+            result["version_type"] = same_number[0].get("version_type")
+            result["error"] = (
+                f"version {mod_version} exists but type is "
+                f"'{same_number[0].get('version_type')}', expected '{want_type}'"
+            )
+            return result
+
+        # mod-publish-plugin can upload one Modrinth version object per loader (same
+        # version_number + game_versions, but only one loader each) rather than a
+        # single multi-loader object. So coverage of a (platform, mc) cell must be
+        # checked across the UNION of all typed entries, not any single "best" one -
+        # otherwise a fully-published release false-positives as "incomplete" because
+        # no single entry lists every loader.
+        missing_cells = []
+        for platform in platforms:
+            for mc in expected_mc:
+                covered = any(
+                    platform in set(v.get("loaders", [])) and _mc_covered(mc, v.get("game_versions", []))
+                    for v in typed
+                )
+                if not covered:
+                    missing_cells.append((platform, mc))
+
+        result["found"] = True
+        result["version_type"] = want_type
+        result["missing_loaders"] = sorted({p for p, _ in missing_cells})
+        result["missing_mc"] = sorted({mc for _, mc in missing_cells})
+        if not missing_cells:
+            result["status"] = "ok"
+            result["ok"] = True
+            return result
+
+        result["status"] = "incomplete"
+        if last_attempt:
+            return result
         time.sleep(MODRINTH_MISSING_RETRY_DELAY)
 
-    if not same_number:
-        return result  # genuinely absent after retries
-
-    typed = [v for v in same_number if v.get("version_type") == want_type]
-    if not typed:
-        # Exists but published under a different type than the tag implies.
-        result["status"] = "wrong_type"
-        result["version_type"] = same_number[0].get("version_type")
-        result["error"] = (
-            f"version {mod_version} exists but type is "
-            f"'{same_number[0].get('version_type')}', expected '{want_type}'"
-        )
-        return result
-
-    # mod-publish-plugin can upload one Modrinth version object per loader (same
-    # version_number + game_versions, but only one loader each) rather than a
-    # single multi-loader object. So coverage of a (platform, mc) cell must be
-    # checked across the UNION of all typed entries, not any single "best" one -
-    # otherwise a fully-published release false-positives as "incomplete" because
-    # no single entry lists every loader.
-    missing_cells = []
-    for platform in platforms:
-        for mc in expected_mc:
-            covered = any(
-                platform in set(v.get("loaders", [])) and _mc_covered(mc, v.get("game_versions", []))
-                for v in typed
-            )
-            if not covered:
-                missing_cells.append((platform, mc))
-
-    result["found"] = True
-    result["version_type"] = want_type
-    result["missing_loaders"] = sorted({p for p, _ in missing_cells})
-    result["missing_mc"] = sorted({mc for _, mc in missing_cells})
-    if not missing_cells:
-        result["status"] = "ok"
-        result["ok"] = True
-    else:
-        result["status"] = "incomplete"
     return result
 
 
