@@ -168,6 +168,9 @@ def audit_mod(entry, defaults, token):
     return results, skipped
 
 
+ISSUE_VERDICTS = ("fail", "error", "unconfirmed")
+
+
 def post_audit(worker_url, api_key, payload):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -202,10 +205,10 @@ def main():
         res, skipped = audit_mod(entry, defaults, token)
         all_results.extend(res)
         total_skipped += skipped
-        issues = sum(1 for r in res if r["verdict"] in ("fail", "error"))
+        issues = sum(1 for r in res if r["verdict"] in ISSUE_VERDICTS)
         print(f"  {entry['key']:14} {len(res):3} lines  {skipped:2} skipped  {issues} issue(s)")
 
-    failures = [r for r in all_results if r["verdict"] in ("fail", "error")]
+    failures = [r for r in all_results if r["verdict"] in ISSUE_VERDICTS]
     print(f"\nAudited the latest release per MC line across {len(reg['mods'])} mods "
           f"({len(all_results)} checked, {total_skipped} skipped) -> {len(failures)} issue(s)")
     for r in failures:

@@ -30,7 +30,12 @@ on:
         type: string
         default: 'https://moogsmods-bot.finndog176.workers.dev'
       fail_on:
-        description: "Fail the job on 'fail' (default) or also on 'pending'"
+        description: >-
+          'fail' (default) only hard-fails on a real Modrinth miss or a
+          CurseForge file visible with a fail-classified status. 'pending'
+          also fails on CurseForge moderation-pending. 'strict' also
+          hard-fails on CurseForge cells still unconfirmed after the
+          processing-lag retries (the old pre-grace-period behavior).
         type: string
         default: 'fail'
     secrets:

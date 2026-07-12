@@ -11,14 +11,21 @@ stdlib-only. Configured entirely by environment variables:
   WORKER_URL      (required)  bot base URL
   WORKER_API_KEY  (required)  X-API-Key for the bot
   MOD_NAME        optional    display name (falls back to modName in props)
-  FAIL_ON         optional    'fail' (default) or 'pending'
+  FAIL_ON         optional    'fail' (default), 'pending', or 'strict'
   TAG_PATTERN     optional    override the default tag regex
   DRY_RUN         optional    if set, never POST (local testing)
 
-Exit codes: 0 = pass/pending/transient-error (no red), 1 = real failure, 3 = config error.
+Exit codes: 0 = pass/pending/unconfirmed/transient-error (no red), 1 = real
+failure, 3 = config error.
 A CurseForge transport error (e.g. the website API bot-challenging a runner) is
 treated as 'error' -> alert but do NOT fail the run, so flaky CF access can't wall
 of false reds. Real misses/rejections still fail.
+
+A CurseForge file that never shows up in the website files API even after
+verifier's bounded retries (~3 minutes) is 'unconfirmed', not a hard miss - the
+website API can't tell 'still in CF's processing queue' apart from 'never
+uploaded', and gradle's synchronous CF upload step already fails the job if the
+upload itself failed. FAIL_ON=strict restores the old hard-fail behavior.
 """
 
 import json
@@ -153,6 +160,7 @@ def main():
         print("::error::no publishMcStart / publishMcEnd / publishExtraMcVersions in gradle.properties")
         return 3
 
+    fail_on = os.environ.get("FAIL_ON", "fail")
     result = verifier.verify_release(
         mod_key=props.get("modId", modrinth_id),
         modrinth_id=modrinth_id,
@@ -161,6 +169,7 @@ def main():
         platforms=expected_platforms(props),
         expected_mc=mc,
         is_alpha=is_alpha,
+        fail_on=fail_on,
     )
 
     # Enrich the payload so the bot can render a rich embed.
@@ -179,7 +188,7 @@ def main():
     verifier._print_human(result)
     verdict = result["verdict"]
 
-    if verdict in ("fail", "error"):
+    if verdict in ("fail", "error", "unconfirmed"):
         if dry_run or not worker_url or not api_key:
             print(f"[dry-run] would POST /verify-alert (verdict={verdict})")
         else:
@@ -190,8 +199,10 @@ def main():
                 print(f"::warning::failed to post verify-alert: {e}")
 
     # Only a real miss/rejection turns the run red. Transient 'error' alerts but
-    # does not fail; 'pending' is silent (v1).
-    fail_on = os.environ.get("FAIL_ON", "fail")
+    # does not fail; 'pending' and 'unconfirmed' are silent (v1) unless FAIL_ON
+    # opts in ('pending' fails on moderation pending; verify_release already
+    # folded 'strict' into a hard 'fail' verdict above, so nothing more to do
+    # here for CurseForge processing lag).
     if verdict == "fail":
         return 1
     if verdict == "pending" and fail_on == "pending":

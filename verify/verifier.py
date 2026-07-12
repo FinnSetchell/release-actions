@@ -72,6 +72,17 @@ CF_LOADER_NAME = {"fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge", 
 MODRINTH_MISSING_RETRIES = 3
 MODRINTH_MISSING_RETRY_DELAY = 20
 
+# CurseForge's processing queue can take 30-60+ seconds (sometimes minutes) to
+# clear before a freshly-uploaded file shows up on the website files API at all,
+# even though gradle's synchronous CF upload step already succeeded. Retry the
+# files list for a few minutes before treating a not-yet-visible file as
+# something other than a confirmed pass.
+CURSEFORGE_MISSING_RETRIES = 6
+CURSEFORGE_MISSING_RETRY_DELAY = 30
+
+# Rank used to pick the single worst per-cell status for a CurseForge check.
+CF_WORST_RANK = {"ok": 0, "pending": 1, "unconfirmed": 2, "fail": 3}
+
 
 def _mc_variants(mc):
     """MC 26.x names releases 'X.Y.0' as 'X.Y' everywhere except gradle.properties
@@ -220,96 +231,118 @@ def _cf_all_files(mod_id):
 
 def check_curseforge(mod_id, mod_version, platforms, expected_mc, is_alpha):
     """Find CF files for this version and classify each expected (loader, mc)
-    cell by the file's moderation status (the FileStatus enum, field `status`)."""
+    cell by the file's moderation status (the FileStatus enum, field `status`).
+
+    The website files API only lists a file once CF's processing queue clears,
+    which can lag the actual (synchronous) gradle upload by 30-60+ seconds or
+    more. So a cell with no matching file yet is retried for a few minutes
+    before being accepted as 'unconfirmed' rather than a hard miss - the
+    website API has no way to tell 'still processing' apart from 'never
+    uploaded', and a real upload failure already fails the job at upload time."""
     result = {
         "found": False, "status": "missing", "ok": False,
-        "missing": [], "pending": [], "failed": [], "cells": [],
+        "missing": [], "unconfirmed": [], "pending": [], "failed": [], "cells": [],
         "url": f"https://www.curseforge.com/projects/{mod_id}/files",
         "error": None,
     }
     want_rt = CF_RELEASE_TYPE["alpha" if is_alpha else "release"]
-    files, err = _cf_all_files(mod_id)
-    if err:
-        result["status"] = "error"
-        result["error"] = err
-        return result
 
-    # Candidate files: right releaseType + version string in the name.
-    candidates = []
-    for f in files:
-        if f.get("releaseType") != want_rt:
-            continue
-        name = (f.get("fileName", "") + " " + f.get("displayName", ""))
-        if mod_version not in name:
-            continue
-        candidates.append(f)
+    cells = []
+    for attempt in range(CURSEFORGE_MISSING_RETRIES):
+        files, err = _cf_all_files(mod_id)
+        if err:
+            result["status"] = "error"
+            result["error"] = err
+            return result
 
-    # For each expected (loader, mc), find a candidate whose gameVersions cover both.
+        # Candidate files: right releaseType + version string in the name.
+        candidates = [
+            f for f in files
+            if f.get("releaseType") == want_rt
+            and mod_version in (f.get("fileName", "") + " " + f.get("displayName", ""))
+        ]
+
+        # For each expected (loader, mc), find a candidate whose gameVersions cover both.
+        cells = []
+        any_unmatched = False
+        for platform in platforms:
+            loader_name = CF_LOADER_NAME.get(platform, platform.capitalize())
+            for mc in expected_mc:
+                hit = None
+                for f in candidates:
+                    gv = f.get("gameVersions", [])
+                    if loader_name in gv and _mc_covered(mc, gv):
+                        hit = f
+                        break
+                cells.append({"platform": platform, "mc": mc, "hit": hit})
+                if hit is None:
+                    any_unmatched = True
+
+        if not any_unmatched or attempt == CURSEFORGE_MISSING_RETRIES - 1:
+            break
+        time.sleep(CURSEFORGE_MISSING_RETRY_DELAY)
+
     worst = "ok"
-    for platform in platforms:
-        loader_name = CF_LOADER_NAME.get(platform, platform.capitalize())
-        for mc in expected_mc:
-            hit = None
-            for f in candidates:
-                gv = f.get("gameVersions", [])
-                if loader_name in gv and _mc_covered(mc, gv):
-                    hit = f
-                    break
-            if hit is None:
-                result["missing"].append(f"{platform}/{mc}")
-                worst = "fail"
-                result["cells"].append({"platform": platform, "mc": mc, "status": "missing"})
-                continue
-            code = hit.get("status")
-            name, cls = CF_FILE_STATUS.get(code, (f"Unknown({code})", "fail"))
-            result["found"] = True
-            cell = {"platform": platform, "mc": mc, "status": cls,
-                    "fileStatus": name, "fileId": hit.get("id"),
-                    "fileName": hit.get("fileName")}
-            result["cells"].append(cell)
-            if cls == "fail":
-                result["failed"].append(f"{platform}/{mc} [{name}]")
-                worst = "fail"
-            elif cls == "pending":
-                result["pending"].append(f"{platform}/{mc} [{name}]")
-                if worst == "ok":
-                    worst = "pending"
+    for cell in cells:
+        platform, mc, hit = cell["platform"], cell["mc"], cell.pop("hit")
+        if hit is None:
+            result["unconfirmed"].append(f"{platform}/{mc}")
+            cell["status"] = "unconfirmed"
+            if CF_WORST_RANK["unconfirmed"] > CF_WORST_RANK[worst]:
+                worst = "unconfirmed"
+            continue
+        result["found"] = True
+        code = hit.get("status")
+        name, cls = CF_FILE_STATUS.get(code, (f"Unknown({code})", "fail"))
+        cell.update({"status": cls, "fileStatus": name, "fileId": hit.get("id"),
+                     "fileName": hit.get("fileName")})
+        if cls == "fail":
+            result["failed"].append(f"{platform}/{mc} [{name}]")
+        elif cls == "pending":
+            result["pending"].append(f"{platform}/{mc} [{name}]")
+        if CF_WORST_RANK[cls] > CF_WORST_RANK[worst]:
+            worst = cls
 
-    if not candidates:
-        result["status"] = "missing"
-    else:
-        result["status"] = worst
-        result["ok"] = (worst == "ok")
+    result["cells"] = cells
+    result["status"] = worst
+    result["ok"] = (worst == "ok")
     return result
 
 
 # ─────────────────────────── Top-level ───────────────────────────
 
 def verify_release(mod_key, modrinth_id, curseforge_id, mod_version,
-                   platforms, expected_mc, is_alpha):
+                   platforms, expected_mc, is_alpha, fail_on="fail"):
     """Run both platform checks and produce an overall verdict.
 
-    verdict: 'pass' | 'fail' | 'pending' | 'error'
-    (v1 alerting acts on 'fail'; 'pending' is reported but silent.)
+    verdict: 'pass' | 'fail' | 'pending' | 'unconfirmed' | 'error'
+    - 'fail': a real miss (Modrinth missing/incomplete/wrong_type, or a
+      CurseForge file visible with a fail-classified FileStatus).
+    - 'unconfirmed': a CurseForge cell never showed up in the files list even
+      after retries. Not a hard failure by default (fail_on='fail') since the
+      website API can't tell processing-lag apart from never-uploaded, and a
+      real upload failure already fails the job at upload time. Pass
+      fail_on='strict' to restore the old hard-fail-on-missing behavior.
+    - 'pending': a file is visible but still in CF moderation.
+    - 'error': a transient API failure, distinct from a real miss.
     """
     mr = check_modrinth(modrinth_id, mod_version, platforms, expected_mc, is_alpha)
     cf = check_curseforge(curseforge_id, mod_version, platforms, expected_mc, is_alpha)
 
-    statuses = {mr["status"], cf["status"]}
-    if "missing" in statuses or "incomplete" in statuses \
-            or "wrong_type" in statuses or cf["failed"]:
-        # missing/incomplete/wrong_type/failed are all actionable failures
+    if mr["status"] in ("missing", "incomplete", "wrong_type") or cf["failed"]:
         verdict = "fail"
-    elif "pending" in statuses:
+    elif fail_on == "strict" and cf["status"] == "unconfirmed":
+        verdict = "fail"
+    elif mr["status"] == "error" or cf["status"] == "error":
+        verdict = "error"
+    elif cf["status"] == "unconfirmed":
+        verdict = "unconfirmed"
+    elif mr["status"] == "pending" or cf["status"] == "pending":
         verdict = "pending"
     elif mr["ok"] and cf["ok"]:
         verdict = "pass"
     else:
         verdict = "fail"
-
-    # An error (transient API failure) is distinct from a real miss.
-    if "error" in statuses and not (mr["status"] in ("missing", "incomplete", "wrong_type") or cf["missing"] or cf["failed"]):
-        verdict = "error"
 
     return {
         "mod": mod_key,
@@ -364,6 +397,9 @@ def main(argv=None):
     p.add_argument("--platforms", default="fabric,forge,neoforge", help="comma-separated loaders")
     p.add_argument("--alpha", action="store_true", help="treat as an alpha release")
     p.add_argument("--json", action="store_true", help="emit full JSON result to stdout")
+    p.add_argument("--fail-on", default="fail", choices=["fail", "strict"],
+                   help="'fail' (default) treats unconfirmed CurseForge cells as non-fatal; "
+                        "'strict' hard-fails on them like before the processing-lag grace period")
     args = p.parse_args(argv)
 
     modrinth_id = args.modrinth_id
@@ -390,6 +426,7 @@ def main(argv=None):
         platforms=platforms,
         expected_mc=_parse_csv(args.mc),
         is_alpha=args.alpha,
+        fail_on=args.fail_on,
     )
 
     if args.json:
@@ -397,11 +434,12 @@ def main(argv=None):
     else:
         _print_human(result)
 
-    return {"pass": 0, "pending": 0, "fail": 1, "error": 3}[result["verdict"]]
+    return {"pass": 0, "pending": 0, "unconfirmed": 0, "fail": 1, "error": 3}[result["verdict"]]
 
 
 def _print_human(r):
-    tag = {"pass": "[PASS]", "pending": "[PEND]", "fail": "[FAIL]", "error": "[ERR ]"}[r["verdict"]]
+    tag = {"pass": "[PASS]", "pending": "[PEND]", "unconfirmed": "[WAIT]",
+           "fail": "[FAIL]", "error": "[ERR ]"}[r["verdict"]]
     print(f"{tag} {r['mod']} {r['version']} ({'alpha' if r['is_alpha'] else 'release'}) -> {r['verdict'].upper()}")
     mr = r["modrinth"]
     print(f"  Modrinth: {mr['status']}"
@@ -410,8 +448,8 @@ def _print_human(r):
           + (f" -{mr['error']}" if mr["error"] else ""))
     cf = r["curseforge"]
     extra = ""
-    if cf["missing"]:
-        extra += f" -missing {cf['missing']}"
+    if cf["unconfirmed"]:
+        extra += f" -unconfirmed (CurseForge processing lag) {cf['unconfirmed']}"
     if cf["failed"]:
         extra += f" -FAILED {cf['failed']}"
     if cf["pending"]:
