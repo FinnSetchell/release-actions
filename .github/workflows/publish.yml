@@ -35,6 +35,11 @@ jobs:
   publish:
     name: Publish
     runs-on: ubuntu-latest
+    # Serialize all publishes per repository: overlapping runs race on the
+    # version-bump push and on Modrinth's create-version cache invalidation.
+    concurrency:
+      group: mods-publish-${{ github.repository }}
+      cancel-in-progress: false
     outputs:
       pack_tasks: ${{ steps.packTasks.outputs.tasks }}
     steps:
@@ -128,6 +133,32 @@ jobs:
           echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
           printf "body<<DELIMITER\n%s\nDELIMITER\n" "$BODY" >> "$GITHUB_OUTPUT"
 
+      - name: Write upload-serialization init script
+        shell: bash
+        run: |
+          # Modrinth commits a new version, then clears a Redis-backed project
+          # cache; concurrent creates can repopulate it stale, leaving a version
+          # invisible for up to 30 min. Chaining mustRunAfter serializes the
+          # upload POSTs (Gradle completes a publish task only once its async
+          # worker-API upload finishes).
+          cat > "$RUNNER_TEMP/serialize-uploads.init.gradle" <<'EOF'
+          gradle.projectsEvaluated {
+              def uploads = []
+              gradle.rootProject.allprojects { p ->
+                  def names = p.tasks.names.findAll { n ->
+                      n.startsWith('publishModrinth') || n.startsWith('publishCurseforge')
+                  }.sort()
+                  names.each { n -> uploads << p.tasks.getByName(n) }
+              }
+              for (int i = 1; i < uploads.size(); i++) {
+                  uploads[i].mustRunAfter(uploads[i - 1])
+              }
+              if (uploads.size() > 1) {
+                  println "[release-actions] serialized platform uploads: ${uploads.collect { it.path }.join(' -> ')}"
+              }
+          }
+          EOF
+
       - name: Publish to CurseForge & Modrinth
         shell: bash
         run: |
@@ -136,7 +167,7 @@ jobs:
           for task in ${{ steps.packTasks.outputs.tasks }}; do
             EXCLUDE="$EXCLUDE -x $task"
           done
-          ./gradlew publishMods $EXCLUDE
+          ./gradlew publishMods $EXCLUDE --init-script "$RUNNER_TEMP/serialize-uploads.init.gradle"
         env:
           MODRINTH_API_KEY: ${{ secrets.MODRINTH_API_KEY }}
           CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
@@ -259,6 +290,10 @@ jobs:
     needs: publish
     if: inputs.configPack != '' && inputs.releaseType != 'alpha'
     runs-on: ubuntu-latest
+    # Same group as publish: pack uploads hit the same platform projects.
+    concurrency:
+      group: mods-publish-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -278,7 +313,21 @@ jobs:
         run: |
           set -eo pipefail
           chmod +x gradlew
-          ./gradlew buildDatapack ${{ needs.publish.outputs.pack_tasks }}
+          cat > "$RUNNER_TEMP/serialize-uploads.init.gradle" <<'EOF'
+          gradle.projectsEvaluated {
+              def uploads = []
+              gradle.rootProject.allprojects { p ->
+                  def names = p.tasks.names.findAll { n ->
+                      n.startsWith('publishModrinth') || n.startsWith('publishCurseforge')
+                  }.sort()
+                  names.each { n -> uploads << p.tasks.getByName(n) }
+              }
+              for (int i = 1; i < uploads.size(); i++) {
+                  uploads[i].mustRunAfter(uploads[i - 1])
+              }
+          }
+          EOF
+          ./gradlew buildDatapack ${{ needs.publish.outputs.pack_tasks }} --init-script "$RUNNER_TEMP/serialize-uploads.init.gradle"
         env:
           MODRINTH_API_KEY: ${{ secrets.MODRINTH_API_KEY }}
           CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
